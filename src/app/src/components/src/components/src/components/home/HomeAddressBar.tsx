@@ -1,0 +1,223 @@
+"use client";
+import {
+  ChangeEvent, FormEvent, KeyboardEvent,
+  useCallback, useEffect, useRef, useState,
+} from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { ArrowRight, Loader2, Lock, Mail, MapPin, Phone } from "lucide-react";
+interface Suggestion {
+  place_id: number;
+  display_name: string;
+  address?: {
+    house_number?: string; road?: string; city?: string;
+    town?: string; village?: string; county?: string;
+    state?: string; postcode?: string;
+  };
+}
+function formatSuggestion(suggestion: Suggestion) {
+  const address = suggestion.address;
+  if (!address) return suggestion.display_name.split(", ").slice(0, 4).join(", ");
+  const street = [address.house_number, address.road].filter(Boolean).join(" ");
+  const city = address.city || address.town || address.village || address.county || "";
+  const state = address.state || "";
+  const zip = address.postcode || "";
+  if (street && city && state) return `${street}, ${city}, ${state}${zip ? ` ${zip}` : ""}`;
+  return suggestion.display_name.split(", ").slice(0, 4).join(", ");
+}
+function normalizePhone(phone: string) { return phone.replace(/\D/g, ""); }
+function isValidEmail(email: string) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()); }
+function isValidPhone(phone: string) {
+  const normalized = normalizePhone(phone);
+  return normalized.length === 0 || normalized.length === 10;
+}
+export default function HomeAddressBar() {
+  const [address, setAddress] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
+  const [nonMarketingConsent, setNonMarketingConsent] = useState(false);
+  const [marketingConsent, setMarketingConsent] = useState(false);
+  const [termsAccepted, setTermsAccepted] = useState(false);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(-1);
+  const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState("");
+  const router = useRouter();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const addressBoxRef = useRef<HTMLDivElement>(null);
+  const formIsValid = address.trim().length > 4 && isValidPhone(phone) && isValidEmail(email);
+  useEffect(() => {
+    function handleClick(event: MouseEvent) {
+      if (addressBoxRef.current && !addressBoxRef.current.contains(event.target as Node)) {
+        setSuggestionsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+  const fetchSuggestions = useCallback(async (value: string) => {
+    const query = value.trim();
+    if (query.length < 3) { setSuggestions([]); setSuggestionsOpen(false); return; }
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoadingSuggestions(true);
+    try {
+      const params = new URLSearchParams({
+        format: "json", q: query, countrycodes: "us",
+        addressdetails: "1", limit: "6", bounded: "0",
+      });
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?${params.toString()}`,
+        { signal: controller.signal, headers: { "Accept-Language": "en-US" } }
+      );
+      if (!response.ok) return;
+      const data = (await response.json()) as Suggestion[];
+      setSuggestions(data);
+      setSuggestionsOpen(data.length > 0);
+      setActiveIndex(-1);
+    } catch (error) {
+      if (error instanceof Error && error.name !== "AbortError") {
+        setSuggestions([]); setSuggestionsOpen(false);
+      }
+    } finally {
+      setLoadingSuggestions(false);
+    }
+  }, []);
+  function handleAddressChange(event: ChangeEvent<HTMLInputElement>) {
+    const value = event.target.value;
+    setAddress(value);
+    setSubmitError("");
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => fetchSuggestions(value), 300);
+  }
+  function selectSuggestion(suggestion: Suggestion) {
+    setAddress(formatSuggestion(suggestion));
+    setSuggestions([]); setSuggestionsOpen(false); setActiveIndex(-1);
+  }
+  function handleAddressKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (!suggestionsOpen || suggestions.length === 0) return;
+    if (event.key === "ArrowDown") { event.preventDefault(); setActiveIndex((i) => Math.min(i + 1, suggestions.length - 1)); }
+    if (event.key === "ArrowUp") { event.preventDefault(); setActiveIndex((i) => Math.max(i - 1, 0)); }
+    if (event.key === "Enter" && activeIndex >= 0) { event.preventDefault(); selectSuggestion(suggestions[activeIndex]); }
+    if (event.key === "Escape") setSuggestionsOpen(false);
+  }
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSubmitError("");
+    if (!formIsValid || submitting) {
+      setSubmitError("Enter a property address, valid email, and use a 10-digit mobile number if you provide one.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const response = await fetch("/api/leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: address.trim(), email: email.trim(),
+          phone: normalizePhone(phone), phoneDisplay: phone.trim(),
+          nonMarketingConsent, marketingConsent, termsAccepted,
+          source: "cash-offer",
+        }),
+      });
+      if (!response.ok) throw new Error("Lead submission failed");
+      router.push("/thank-you");
+    } catch {
+      setSubmitError("We could not submit the form. Please call or text (209) 857-1857.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return (
+    <div className="w-full max-w-[520px]">
+      <form onSubmit={handleSubmit} className="rounded-[14px] bg-white p-4 shadow-[0_14px_32px_rgba(8,31,63,0.26)]">
+        <div className="grid gap-3">
+          <div ref={addressBoxRef} className="relative">
+            <label className="flex min-h-[64px] items-center gap-3 rounded-md border border-gray-200 bg-white px-4 sm:min-h-[58px]">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center">
+                {loadingSuggestions ? (
+                  <Loader2 size={26} strokeWidth={2.2} className="animate-spin text-brand-highlight" />
+                ) : (
+                  <MapPin size={32} strokeWidth={2.2} className="text-brand-highlight" />
+                )}
+              </span>
+              <span className="sr-only">Property address</span>
+              <input
+                value={address} onChange={handleAddressChange} onKeyDown={handleAddressKeyDown}
+                onFocus={() => suggestions.length > 0 && setSuggestionsOpen(true)}
+                type="text" autoComplete="street-address"
+                placeholder="Enter your property address" required
+                className="w-full bg-transparent text-left text-sm font-medium text-brand-text outline-none placeholder:text-brand-muted sm:text-base"
+              />
+            </label>
+            {suggestionsOpen && suggestions.length > 0 && (
+              <ul className="absolute left-0 right-0 top-full z-30 mt-2 overflow-hidden rounded-lg border border-gray-200 bg-white text-left shadow-xl">
+                {suggestions.map((suggestion, index) => (
+                  <li key={suggestion.place_id}>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); selectSuggestion(suggestion); }}
+                      className={`flex w-full items-start gap-3 px-4 py-3 text-left text-sm transition-colors ${
+                        index === activeIndex ? "bg-brand-soft-bg text-brand-mid" : "text-brand-text hover:bg-brand-soft-bg"
+                      }`}>
+                      <MapPin size={16} strokeWidth={2} className="mt-0.5 shrink-0 text-brand-highlight" />
+                      <span className="leading-snug">{formatSuggestion(suggestion)}</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="flex min-h-[64px] items-center gap-3 rounded-md border border-gray-200 bg-white px-4 sm:min-h-[54px]">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center">
+                <Phone size={30} strokeWidth={2.2} className="text-brand-highlight" />
+              </span>
+              <span className="sr-only">Mobile number, optional</span>
+              <input value={phone} onChange={(e) => { setPhone(e.target.value); setSubmitError(""); }}
+                type="tel" inputMode="tel" autoComplete="tel" placeholder="Mobile number (optional)"
+                className="w-full bg-transparent text-left text-sm font-medium text-brand-text outline-none placeholder:text-brand-muted sm:text-base"
+              />
+            </label>
+            <label className="flex min-h-[64px] items-center gap-3 rounded-md border border-gray-200 bg-white px-4 sm:min-h-[54px]">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center">
+                <Mail size={30} strokeWidth={2.2} className="text-brand-highlight" />
+              </span>
+              <span className="sr-only">Email address</span>
+              <input value={email} onChange={(e) => { setEmail(e.target.value); setSubmitError(""); }}
+                type="email" autoComplete="email" placeholder="Email address" required
+                className="w-full bg-transparent text-left text-sm font-medium text-brand-text outline-none placeholder:text-brand-muted sm:text-base"
+              />
+            </label>
+          </div>
+          <div className="space-y-3 rounded-md border border-gray-200 bg-gray-50 p-4 text-left text-xs leading-5 text-brand-text">
+            <label className="flex items-start gap-3">
+              <input type="checkbox" checked={nonMarketingConsent} onChange={(e) => { setNonMarketingConsent(e.target.checked); setSubmitError(""); }}
+                className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-highlight focus:ring-brand-highlight" />
+              <span>I agree to receive non-marketing SMS messages from Tierra Roots Acquisitions LLC regarding responses to my requests, cash offer updates, property evaluation notifications, process updates, closing coordination, reminders and customer support communications. Message frequency may vary. Reply &ldquo;HELP&rdquo; for assistance or &ldquo;STOP&rdquo; to unsubscribe. Standard message and data rates may apply.</span>
+            </label>
+            <label className="flex items-start gap-3">
+              <input type="checkbox" checked={marketingConsent} onChange={(e) => { setMarketingConsent(e.target.checked); setSubmitError(""); }}
+                className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-highlight focus:ring-brand-highlight" />
+              <span>I agree to receive marketing SMS messages from Tierra Roots Acquisitions LLC regarding promotional offers, discounts, and related marketing communications. Message frequency may vary. Reply &ldquo;HELP&rdquo; for assistance or &ldquo;STOP&rdquo; to unsubscribe. Standard message and data rates may apply.</span>
+            </label>
+            <label className="flex items-start gap-3">
+              <input type="checkbox" checked={termsAccepted} onChange={(e) => { setTermsAccepted(e.target.checked); setSubmitError(""); }}
+                className="mt-1 h-4 w-4 rounded border-gray-300 text-brand-highlight focus:ring-brand-highlight" />
+              <span>By checking this box, I accept the{" "}
+                <Link href="/privacy" className="font-bold text-brand-mid hover:underline">Privacy Policy</Link>{" "}and{" "}
+                <Link href="/privacy#terms" className="font-bold text-brand-mid hover:underline">Terms of Services</Link>.
+              </span>
+            </label>
+          </div>
+          <button type="submit" disabled={!formIsValid || submitting}
+            className="flex min-h-[56px] items-center justify-center gap-4 rounded-md bg-brand-accent px-5 text-base font-bold text-black transition-colors hover:bg-brand-accent-dark disabled:cursor-not-allowed disabled:opacity-55">
+            {submitting ? "Submitting..." : "Get Free Quote"}
+            {!submitting && <ArrowRight size={22} strokeWidth={2.1} />}
+          </button>
+        </div>
+        {submitError && <p className="mt-3 text-center text-sm font-semibold text-red-600">{submitError}</p>}
+      </form>
+      <div className="mt-
